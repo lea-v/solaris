@@ -13,6 +13,7 @@ from .metrics import get_metrics
 import torch
 from torch.optim.lr_scheduler import _LRScheduler
 import tensorflow as tf
+from torch.utils.tensorboard import SummaryWriter
 
 
 class Trainer(object):
@@ -57,6 +58,17 @@ class Trainer(object):
         self.stop = False
 
         self.initialize_model()
+
+        if self.config.get('tensorboard_log_path', None) is not None:
+            self.writer = SummaryWriter(self.config['tensorboard_log_path'])
+            dummy_input = torch.rand([self.batch_size, 4, self.config['data_specs']['width'], self.config['data_specs']['height']])
+            if self.gpu_available:
+                dummy_input = dummy_input.cuda()
+            self.writer.add_graph(self.model, dummy_input)
+            self.writer.flush()
+        else:
+            self.writer = None
+
 
     def initialize_model(self):
         """Load in and create all model training elements."""
@@ -109,12 +121,14 @@ class Trainer(object):
 
         elif self.framework == 'torch':
 #            tf_sess = tf.Session()
+            step = 0
             for epoch in range(self.epochs):
                 if self.verbose:
                     print('Beginning training epoch {}'.format(epoch))
                 # TRAINING
                 self.model.train()
                 for batch_idx, batch in enumerate(self.train_datagen):
+                    step += 1
                     if torch.cuda.is_available():
                         if self.config['data_specs'].get('additional_inputs',
                                                          None) is not None:
@@ -141,8 +155,21 @@ class Trainer(object):
                     loss.backward()
                     self.optimizer.step()
 
-                    if self.verbose and batch_idx % 10 == 0:
+                    if self.writer is not None:
+                        self.writer.add_scalar('training_loss', loss, step)
+                        self.writer.flush()
 
+                    if self.writer is not None and batch_idx % 10 == 0:
+                        self.writer.add_image('model_input', data[0], step)
+                        self.writer.add_image('model_gt', target[0], step)
+
+                        min_out = torch.min(output)
+                        self.writer.add_image('model_output', (output[0] - min_out)/(torch.max(output) - min_out), step)
+                        self.writer.flush()
+
+                    if self.verbose and batch_idx % 10 == 0:
+                        print("target", target.shape)
+                        print("outpur", output.shape)
                         print('    loss at batch {}: {}'.format(
                             batch_idx, loss), flush=True)
                         # calculate metrics
@@ -179,6 +206,10 @@ class Trainer(object):
                         val_output = self.model(data)
                         val_loss.append(self.loss(val_output, target))
                     val_loss = torch.mean(torch.stack(val_loss))
+
+                    if self.writer is not None:
+                        self.writer.add_scalar('val_loss', val_loss, step)
+
                 if self.verbose:
                     print()
                     print('    Validation loss at epoch {}: {}'.format(
